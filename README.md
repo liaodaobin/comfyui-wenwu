@@ -2,11 +2,13 @@
 
 ComfyUI custom nodes for Bernini prompt workflows.
 
-This node package is built specifically for Bernini prompt generation and prompt editing inside ComfyUI. It focuses on turning user input, images, reference images, and sampled video frames into structured bilingual prompts through a local `ComfyUI-llama-cpp` model.
+This node package is built specifically for Bernini prompt generation inside ComfyUI. Bernini has high requirements for prompt quality, so this node lets users enter natural spoken-style descriptions and then uses a local `llama.cpp` inference workflow through `ComfyUI-llama-cpp` to convert them into professional Bernini prompts.
+
+The goal is to save users from manually writing strict Bernini prompt text while keeping the conversion local.
 
 ## What this node provides
 
-- **Bernini Prompt wenwu**: generates bilingual Bernini-oriented prompt text for image and video tasks through a local `ComfyUI-llama-cpp` model.
+- **Bernini Prompt wenwu**: converts natural user descriptions into professional Bernini-oriented prompt text for image and video tasks through a local `ComfyUI-llama-cpp` model.
 - **Simple Text**: a lightweight canvas text node that can be edited by double-clicking the node or using the node context menu.
 
 ## Current status
