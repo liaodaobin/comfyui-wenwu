@@ -36,7 +36,7 @@ Clone this repository into the ComfyUI `custom_nodes` directory:
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone <repository-url> comfyui-wenwu
+git clone https://github.com/liaodaobin/comfyui-wenwu.git comfyui-wenwu
 ```
 
 Install Python dependencies:
