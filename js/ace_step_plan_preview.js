@@ -17,6 +17,10 @@ function widgetValue(node, name, fallback = null) {
     return widget?.value ?? fallback;
 }
 
+function isLegacyBooleanText(value) {
+    return typeof value === "string" && ["true", "false"].includes(value.trim().toLowerCase());
+}
+
 function linkedNode(node, inputName) {
     const input = (node.inputs || []).find((item) => item.name === inputName);
     const link = input?.link != null ? app.graph.links?.[input.link] : null;
@@ -108,6 +112,10 @@ function applyPlannerLayout(node) {
 
     if (approved?.inputEl) {
         approved.label = "\u786e\u8ba4\u7a3f";
+        if (isLegacyBooleanText(approved.value)) {
+            approved.value = "";
+            approved.callback?.("");
+        }
         const editable = Boolean(editMode?.value);
         approved.inputEl.readOnly = !editable;
         approved.inputEl.placeholder = editable

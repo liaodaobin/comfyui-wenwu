@@ -306,7 +306,8 @@ class AceStepLLMSongPlanner:
         language_hint = language
         keyscale_hint = "auto"
         negative_hint = ""
-        if use_confirmed_prompt and _clean_text(approved_plan):
+        approved_plan = _clean_approved_plan_text(approved_plan)
+        if use_confirmed_prompt and approved_plan:
             plan = _parse_approved_plan_text(approved_plan)
             plan = helper._normalize_plan(plan, description, duration, bpm_override, language_hint, keyscale_hint)
         else:
@@ -527,6 +528,11 @@ def _json_object_candidates(text):
 
 def _clean_text(value):
     return str(value or "").replace("\\n", "\n").strip()
+
+
+def _clean_approved_plan_text(value):
+    text = _clean_text(value)
+    return "" if text.lower() in {"true", "false"} else text
 
 
 def _format_tags_lines(tags):
