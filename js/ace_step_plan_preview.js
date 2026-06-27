@@ -5,8 +5,8 @@ const PLANNER_MIN_WIDTH = 500;
 const PLANNER_MIN_HEIGHT = 500;
 const PLANNER_MAX_HEIGHT = 620;
 const DESCRIPTION_HEIGHT = 54;
-const APPROVED_MIN_HEIGHT = 280;
-const APPROVED_MAX_HEIGHT = 360;
+const APPROVED_MIN_HEIGHT = 220;
+const APPROVED_MAX_HEIGHT = 320;
 
 function findWidget(node, name) {
     return (node.widgets || []).find((widget) => widget.name === name);
@@ -118,7 +118,7 @@ function applyPlannerLayout(node) {
         approved.inputEl.style.color = editable ? "#f2f2f2" : "#b8b8b8";
         approved.inputEl.style.resize = "none";
         approved.inputEl.style.overflowY = "auto";
-        const reservedHeight = 265;
+        const reservedHeight = 305;
         const nodeHeight = Math.min(node.size?.[1] || PLANNER_MIN_HEIGHT, PLANNER_MAX_HEIGHT);
         const approvedHeight = Math.min(APPROVED_MAX_HEIGHT, Math.max(APPROVED_MIN_HEIGHT, nodeHeight - reservedHeight));
         setTextareaHeight(approved, approvedHeight);

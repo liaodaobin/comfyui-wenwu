@@ -1,4 +1,5 @@
 import json
+import gc
 import os
 import re
 import sys
@@ -22,6 +23,15 @@ LANGUAGES = [
 ]
 
 COMMON_LANGUAGES = ["zh", "en", "ja", "ko", "yue", "fr", "de", "es", "ru", "unknown"]
+
+
+class AnyType(str):
+    def __ne__(self, value):
+        return False
+
+
+ANY_TYPE = AnyType("*")
+
 
 KEYSCALES = [
     f"{root} {quality}"
@@ -302,6 +312,7 @@ class AceStepLLMSongPlanner:
         else:
             plan = helper._ask_llama(llama_model, description, seed, duration, bpm_override, language_hint, keyscale_hint, negative_hint)
             plan = helper._normalize_plan(plan, description, duration, bpm_override, language_hint, keyscale_hint)
+            _cleanup_llama_storage()
         plan_json = json.dumps(plan, ensure_ascii=False, indent=2)
         tokens = clip.tokenize(
             plan["tags"],
@@ -395,6 +406,25 @@ class AceStepConfirmedSongEncoder:
         return (clip.encode_from_tokens_scheduled(tokens),)
 
 
+class AceStepLlamaMemoryCleanup:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "any": (ANY_TYPE,),
+            },
+        }
+
+    RETURN_TYPES = (ANY_TYPE,)
+    RETURN_NAMES = ("any",)
+    FUNCTION = "cleanup"
+    CATEGORY = "AceStep/LLM"
+
+    def cleanup(self, any):
+        _cleanup_llama_storage()
+        return (any,)
+
+
 def _get_llama_storage():
     for module in list(sys.modules.values()):
         path = getattr(module, "__file__", "") or ""
@@ -412,6 +442,26 @@ def _get_llama_storage():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module.LLAMA_CPP_STORAGE
+
+
+def _cleanup_llama_storage():
+    storage = _get_llama_storage()
+    print("[AceStep-LLM-WENWU] Unloading llama.cpp model and collecting memory...")
+    storage.clean()
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception as exc:
+        print(f"[AceStep-LLM-WENWU] CUDA cache cleanup skipped: {exc}")
+    try:
+        import comfy.model_management as mm
+        mm.soft_empty_cache()
+    except Exception as exc:
+        print(f"[AceStep-LLM-WENWU] ComfyUI soft cache cleanup skipped: {exc}")
 
 
 def _parse_json_object(text):
@@ -739,11 +789,11 @@ if server is not None and web is not None:
             language = _clean_text(data.get("language", "auto")) or "auto"
             if language not in (["auto"] + LANGUAGES):
                 language = "auto"
-
             seed = _safe_int(data.get("seed"), int(time.time() * 1000) & 0xFFFFFFFF)
             helper = AceStepLLMSongEncoder()
             plan = helper._ask_llama(llama_model, description, seed, duration, 0, language, "auto", "")
             plan = helper._normalize_plan(plan, description, duration, 0, language, "auto")
+            _cleanup_llama_storage()
             return web.json_response({
                 "text": _format_preview_text(plan),
                 "plan": plan,
@@ -758,6 +808,7 @@ NODE_CLASS_MAPPINGS = {
     "AceStepLLMSongPlanner": AceStepLLMSongPlanner,
     "AceStepSongPlanPreview": AceStepSongPlanPreview,
     "AceStepConfirmedSongEncoder": AceStepConfirmedSongEncoder,
+    "AceStepLlamaMemoryCleanup": AceStepLlamaMemoryCleanup,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -765,4 +816,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AceStepLLMSongPlanner": "ACE Step 1.5 LLM WENWU",
     "AceStepSongPlanPreview": "ACE Step Song Plan Preview",
     "AceStepConfirmedSongEncoder": "ACE Step 1.5 Encode Confirmed Song Plan",
+    "AceStepLlamaMemoryCleanup": "ACE Step Llama Memory Cleanup",
 }
