@@ -1,14 +1,15 @@
 # comfyui-wenwu
 
-ComfyUI custom nodes for WenWu prompt workflows.
+ComfyUI custom nodes for WenWu local prompt workflows, covering Bernini image/video prompts, Krea2 prompt rewriting, and ACE Step 1.5 music planning.
 
-This node package is built for local prompt generation inside ComfyUI. It lets users enter natural spoken-style descriptions and then uses local `llama.cpp` inference through `ComfyUI-llama-cpp` to convert them into structured prompts.
+This node package is built for local generation inside ComfyUI. It lets users enter natural spoken-style descriptions and then uses local `llama.cpp` inference through `ComfyUI-llama-cpp` to convert them into structured prompts for different downstream tools.
 
-The goal is to save users from manually writing strict prompt text while keeping the conversion local.
+The goal is to save users from manually writing strict prompt text while keeping the conversion local and reusable across visual and music workflows.
 
 ## What this node provides
 
 - **Bernini Prompt wenwu**: converts natural user descriptions into professional Bernini-oriented prompt text for image and video tasks through a local `ComfyUI-llama-cpp` model.
+- **WenWu Krea2 Prompt Instruct**: converts Chinese or mixed-language image ideas into a single polished English Krea2 prompt. It supports text-to-image prompt expansion and optional style-reference prompt rewriting.
 - **ACE Step 1.5 LLM WENWU**: converts natural music descriptions into ACE Step 1.5-ready tags, lyrics, BPM, duration, language, key, and conditioning. It includes a preview/refresh UI and an editable confirmed prompt box.
 - **Simple Text**: a lightweight canvas text node that can be edited by double-clicking the node or using the node context menu.
 
@@ -41,6 +42,14 @@ Recent local changes replace the previous `WenWuShowAndSaveAnything` node export
 - style-based BPM, time signature, language, and key suggestions
 - direct `conditioning` and `duration` outputs for ACE Step 1.5 workflows
 
+`WenWu Krea2 Prompt Instruct` is implemented in `krea2_prompt_instruct.py` with frontend controls in `js/krea2_prompt_instruct.js`. It supports:
+
+- local Krea2 prompt generation through a connected llama.cpp model loader
+- Chinese or mixed-language input rewritten into one continuous English prompt
+- optional style-reference mode with an uploaded image used only for transferable visual style
+- automatic hiding of the style image selector when style-reference mode is off
+- clean output suitable for direct Krea2 text-to-image generation
+
 ## Installation
 
 Clone this repository into the ComfyUI `custom_nodes` directory:
@@ -67,9 +76,11 @@ ComfyUI/custom_nodes/ComfyUI-llama-cpp
 ComfyUI/custom_nodes/comfyui-wenwu
 ```
 
+If you want this plugin to be copyable as a single folder, copy both directories together as siblings.
+
 Python dependencies are listed in `requirements.txt`.
 
-The ACE Step music node also expects an existing ACE Step 1.5 ComfyUI setup, including the required ACE Step nodes and model files. This repository does not include ACE Step model weights, llama.cpp model weights, or ComfyUI itself.
+The Krea2 node depends on `ComfyUI-llama-cpp` for local prompt rewriting. The ACE Step music node also expects an existing ACE Step 1.5 ComfyUI setup, including the required ACE Step nodes and model files. This repository does not include ACE Step model weights, llama.cpp model weights, or ComfyUI itself.
 
 ## Notes
 
