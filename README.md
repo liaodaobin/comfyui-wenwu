@@ -13,6 +13,16 @@ The goal is to save users from manually writing strict prompt text while keeping
 - **ACE Step 1.5 LLM WENWU**: converts natural music descriptions into ACE Step 1.5-ready tags, lyrics, BPM, duration, language, key, and conditioning. It includes a preview/refresh UI and an editable confirmed prompt box.
 - **Simple Text**: a lightweight canvas text node that can be edited by double-clicking the node or using the node context menu.
 
+## Model-focused workflows
+
+This package is not a single Bernini node. It contains three model-facing prompt helpers that share the same WenWu idea: write naturally first, then let a local LLM turn the request into the stricter format expected by the target model.
+
+| Node | Target model or workflow | Best for | Main output |
+| --- | --- | --- | --- |
+| **Bernini Prompt wenwu** | Bernini image and video prompt workflows | Turning loose Chinese or mixed-language scene ideas into polished Bernini-style visual prompts | Structured prompt text for image/video generation |
+| **WenWu Krea2 Prompt Instruct** | Krea2 text-to-image and style-reference workflows | Rewriting short image ideas into a single continuous English Krea2 prompt, with optional style-reference image guidance | Clean English Krea2 prompt text |
+| **ACE Step 1.5 LLM WENWU** | ACE Step 1.5 music generation workflows | Planning songs from natural music descriptions, including style, lyrics, vocals, BPM, key, duration, and conditioning | ACE Step-ready tags, lyrics, prompt text, `conditioning`, and `duration` |
+
 ## Current status
 
 This repository is synced from a local ComfyUI custom node directory:
@@ -49,6 +59,10 @@ Recent local changes replace the previous `WenWuShowAndSaveAnything` node export
 - optional style-reference mode with an uploaded image used only for transferable visual style
 - automatic hiding of the style image selector when style-reference mode is off
 - clean output suitable for direct Krea2 text-to-image generation
+
+## Version notes
+
+See [CHANGELOG.md](CHANGELOG.md) for the current update notes. The latest update clarifies the three target workflows, documents the Krea2 node separately from the Bernini node, and makes optional model-specific imports more tolerant so one missing workflow dependency does not prevent the rest of the node pack from loading.
 
 ## Installation
 

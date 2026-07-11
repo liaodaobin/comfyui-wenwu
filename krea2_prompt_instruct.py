@@ -17,7 +17,7 @@ def _load_llama_cpp_instruct():
     if not LLAMA_CPP_NODES.exists():
         raise RuntimeError(
             "ComfyUI-llama-cpp was not found next to comfyui-wenwu. "
-            "Install it under ComfyUI/custom_nodes first."
+            "Install it under ComfyUI/custom_nodes first, or copy the whole plugin pair together."
         )
 
     module_name = f"{LLAMA_CPP_ALIAS}.nodes"
