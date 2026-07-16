@@ -1,6 +1,6 @@
 # comfyui-wenwu
 
-ComfyUI custom nodes for WenWu local prompt workflows, covering Bernini image/video prompts, Krea2 prompt rewriting, and ACE Step 1.5 music planning.
+ComfyUI custom nodes for WenWu local prompt workflows, covering Bernini image/video prompts, an independent LTX-2.3 multi-reference prompt enhancer, Krea2 prompt rewriting, and ACE Step 1.5 music planning.
 
 This node package is built for local generation inside ComfyUI. It lets users enter natural spoken-style descriptions and then uses local `llama.cpp` inference through `ComfyUI-llama-cpp` to convert them into structured prompts for different downstream tools.
 
@@ -9,6 +9,7 @@ The goal is to save users from manually writing strict prompt text while keeping
 ## What this node provides
 
 - **Bernini Prompt wenwu**: converts natural user descriptions into professional Bernini-oriented prompt text for image and video tasks through a local `ComfyUI-llama-cpp` model.
+- **WenWu LTX-2.3 Prompt Enhancer**: generates duration-aware English LTX-2.3 video prompts from natural-language direction and as many as five reference images. References 1-4 are subject slots and Reference 5 is the dedicated Licon background slot.
 - **WenWu Krea2 Prompt Instruct**: converts Chinese or mixed-language image ideas into a single polished English Krea2 prompt. It supports text-to-image prompt expansion and optional style-reference prompt rewriting.
 - **ACE Step 1.5 LLM WENWU**: converts natural music descriptions into ACE Step 1.5-ready tags, lyrics, BPM, duration, language, key, and conditioning. It includes a preview/refresh UI and an editable confirmed prompt box.
 - **Simple Text**: a lightweight canvas text node that can be edited by double-clicking the node or using the node context menu.
@@ -49,6 +50,21 @@ Recent local changes replace the previous `WenWuShowAndSaveAnything` node export
 - optional style-reference mode with an uploaded image used only for transferable visual style
 - automatic hiding of the style image selector when style-reference mode is off
 - clean output suitable for direct Krea2 text-to-image generation
+
+`WenWu LTX-2.3 Prompt Enhancer` is implemented independently in `ltx23_wenwu_node.py`, with its preview and edit controls in `js/ltx23_prompt_preview.js`. It supports:
+
+- one to five reference images in a single multimodal Llama pass
+- fixed Licon mapping: References 1-4 supply subjects and Reference 5 supplies the exclusive background environment
+- subject identity separation to reduce face, hairstyle, costume, accessory, voice, and role blending
+- exclusion of incidental portrait backgrounds unless the user explicitly asks to retain one
+- English cinematic narration while preserving quoted dialogue exactly in its original language and script
+- duration-aware story pacing, shot count, action, camera direction, synchronized dialogue, ambience, effects, and optional background music
+- editable enhanced-prompt preview: locked mode regenerates with Llama; edit mode uses the confirmed prompt without another Llama inference
+- configurable duration, frame rate, resolution, seed, and LTX-compatible frame-count output
+- automatic llama.cpp/mmproj memory cleanup before downstream video models run
+- vision-thumbnail acceleration applied only to the Llama analysis copy: subject references are limited to a 640-pixel longest edge and Reference 5 to 768 pixels; original images remain untouched for Licon MSR and downstream LTX-2.3 processing
+
+The thumbnail optimization fixes a previous single-image encoding path that accepted a size limit but did not actually resize separately connected reference images. It improves multi-reference prompt inference speed without lowering the resolution of images used by the video-generation workflow. Very small facial marks, jewelry engravings, or fine textile details may still benefit from clearer source images and explicit natural-language identity anchors.
 
 ## Installation
 
