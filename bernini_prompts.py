@@ -151,29 +151,21 @@ T2I_A14B_EN_SYS_PROMPT = (
     )
 )
 
-R2V_TEMPLATE = """You are an expert at writing subject-driven video generation prompts. I'm providing you with:
-1. {image_num} reference image(s) of the subject(s) that will appear in the video (referred to as image0, image1, image2, ... in order).
-2. An original video description text.
+R2V_TEMPLATE = """Write one concise English prompt for a reference-subject video.
 
-Your task is to rewrite the original description into a new format with TWO parts concatenated together:
+References: {image_num} image(s), named image0, image1, image2, etc. in order.
+User request: {original_text}
 
-**Part 1 - Short instruction**: A concise sentence describing who the subject(s) from the reference image(s) are, what they look like briefly, where they are, and what key action/motion they perform. Reference the subject(s) using "image0", "image1", etc. to link them to the provided reference images.
-
-**Part 2 - Long instruction**: A detailed "Generate a video where..." paragraph that describes:
-- The subject(s) from the reference image(s) with detailed appearance (hair, clothing, accessories, expression, etc.), referencing them as "the person/man/woman from image0" etc.
-- The scene/environment in detail (background, lighting, objects, atmosphere).
-- The motion and actions in a step-by-step temporal sequence (at the start..., then..., after that...).
-- The motion should remain natural and realistic.
-
-Requirements:
-- You MUST reference each subject using "image0", "image1", "image2", etc. to correspond to the provided reference images in order.
-- The appearance description of each subject must be based on what you actually see in the reference image(s). Do NOT hallucinate details not visible in the images.
-- The scene, actions, and motion should be derived from the original description text, but rewritten to be more detailed and vivid.
-- The output must be entirely in English.
-- Return ONLY a JSON object with one key: "rewritten_text". The value should be the full rewritten text (short instruction + long instruction concatenated as one string). No extra text.
-
-Original description:
-{original_text}
+Rules:
+- Infer the role of every reference from the user request: identity/person, clothing, object, pose, style, or background. Do not assume every image is a separate person.
+- Use image0/image1 names when assigning roles. If image0 shows the person and image1 is a clothing close-up, preserve the exact identity and appearance of the person from image0 while applying only the exact garment shown in image1.
+- Preserve the face, hair, apparent age, skin tone, and body proportions of every intended person in every frame. Never substitute, swap, blend, or redesign identities.
+- For a clothing or object reference, transfer only the requested item with its exact colors, materials, and visible details. Do not copy that reference's unrelated person, pose, framing, or setting, and do not invent logos or details.
+- Do not copy a reference image's original background unless the user explicitly requests it. The user's stated setting overrides unrelated snow scenes, rooms, streets, beaches, or scenery visible in references.
+- A multi-view contact sheet represents one subject, not several subjects.
+- Describe only the requested action, essential interaction, simple setting, and natural motion. Avoid repetitive timelines, long scenery descriptions, and invented appearance details.
+- Keep the result between 60 and 110 English words in one paragraph.
+- Return only a JSON object with one string key named "rewritten_text" and no extra text.
 """
 
 R2I_TEMPLATE = """You are an expert at writing subject-driven image generation prompts. I'm providing you with:

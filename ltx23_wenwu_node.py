@@ -160,7 +160,7 @@ class WenWuLTX23PromptEnhancer(WenWuPromptGenerator):
     FUNCTION = "enhance"
     CATEGORY = "WenWu/Prompt/LTX-2.3"
     TITLE = "WenWu LTX-2.3 Prompt Enhancer"
-    OUTPUT_NODE = True
+    OUTPUT_NODE = False
 
     def enhance(self, llama_model, video_theme, optimized_prompt_display, refresh_prompt, duration_seconds, frame_rate, resolution, seed, reference_image_1=None,
                 reference_image_2=None, reference_image_3=None, reference_image_4=None, reference_image_5=None):

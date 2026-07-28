@@ -1,0 +1,28 @@
+﻿comfyui-wenwu 安装说明
+======================
+
+给别人使用时，建议直接发送整个 comfyui-wenwu 文件夹，放到：
+
+ComfyUI\custom_nodes\comfyui-wenwu
+
+安装步骤：
+
+1. 把 comfyui-wenwu 文件夹复制到 ComfyUI\custom_nodes 里面。
+2. 双击 comfyui-wenwu\install_dependencies.bat 安装 Python 依赖。
+3. 确认旁边还有 ComfyUI-llama-cpp：
+
+   ComfyUI\custom_nodes\ComfyUI-llama-cpp
+   ComfyUI\custom_nodes\comfyui-wenwu
+
+4. 重启 ComfyUI。
+
+如果双击脚本失败，可以手动执行：
+
+python -m pip install -r ComfyUI\custom_nodes\comfyui-wenwu\requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+注意：
+
+- PyPI 国内镜像只负责安装 Python 依赖。
+- Git 国内镜像只负责下载 Git 仓库。
+- WenWuPromptGenerator 依赖 ComfyUI-llama-cpp 提供 LLAMACPPMODEL 输入类型。
+- 如果没有 ComfyUI-llama-cpp，节点可能显示不完整或无法执行。

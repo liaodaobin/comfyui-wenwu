@@ -1,13 +1,19 @@
 import hashlib
 import importlib
 import importlib.util
+import gc
+import json
 import os
 import re
 import sys
 
 import cv2
 import numpy as np
+import torch
+from PIL import Image, ImageOps
 
+import comfy.model_management
+import folder_paths
 from .core_utils import image_tensor_batch_to_data_urls, mie_log
 from .bernini_prompts import (
     ADS2V_TEMPLATE,
@@ -31,9 +37,25 @@ MY_CATEGORY = "WenWu/Prompt"
 DEFAULT_VIDEO_FRAMES = 3
 DEFAULT_VIDEO_MAX_SIZE = 256
 DEFAULT_REFERENCE_VIDEO_FRAMES = 24
+DEFAULT_BERNINI_LENGTH = 81
+MAX_EMBEDDED_REFERENCE_IMAGES = 6
+EMBEDDED_REFERENCE_MAX_EDGE = 1024
+BERNINI_RESOLUTION_PRESETS = (
+    "832*480 横",
+    "480*832 竖",
+    "1280*720 横",
+    "720*1280 竖",
+)
+BERNINI_RESOLUTION_MAP = {
+    "832*480 横": (832, 480),
+    "480*832 竖": (480, 832),
+    "1280*720 横": (1280, 720),
+    "720*1280 竖": (720, 1280),
+}
 
 
 def _extract_json_text(text):
+    import ast
     import json
 
     if not text:
@@ -42,21 +64,44 @@ def _extract_json_text(text):
     fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", s, re.DOTALL)
     if fence:
         s = fence.group(1).strip()
-    try:
-        obj = json.loads(s)
-        if isinstance(obj, dict) and isinstance(obj.get("rewritten_text"), str):
-            return obj["rewritten_text"].strip()
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r"\{[\s\S]*\}", s)
-    if m:
-        try:
-            obj = json.loads(m.group(0))
+    def extract_object(candidate):
+        for loader in (json.loads, ast.literal_eval):
+            try:
+                obj = loader(candidate)
+            except (ValueError, SyntaxError, json.JSONDecodeError):
+                continue
             if isinstance(obj, dict) and isinstance(obj.get("rewritten_text"), str):
                 return obj["rewritten_text"].strip()
-        except json.JSONDecodeError:
-            pass
+        return None
+
+    extracted = extract_object(s)
+    if extracted is not None:
+        return extracted
+    m = re.search(r"\{[\s\S]*\}", s)
+    if m:
+        extracted = extract_object(m.group(0))
+        if extracted is not None:
+            return extracted
     return s
+
+
+def _apply_reference_identity_lock(prompt, image_count):
+    """Deterministically prepend a concise identity/outfit lock for reference subjects."""
+    count = max(0, min(int(image_count or 0), MAX_EMBEDDED_REFERENCE_IMAGES))
+    if count == 0:
+        return (prompt or "").strip()
+    refs = ", ".join(f"image{i}" for i in range(count))
+    lock = (
+        f"Use the references ({refs}) only for their intended roles. "
+        "Preserve the exact facial identity, apparent age, hairstyle, hair color, skin tone, and body "
+        "proportions of every person intended to remain. When another reference supplies clothing, an "
+        "object, or a style, transfer only that requested attribute with its exact colors, materials, "
+        "and details; do not copy that reference's unrelated person, pose, framing, or background. "
+        "Do not swap, blend, redesign, simplify, or substitute identities, and do not add logos, emblems, "
+        "or costume details absent from the corresponding reference."
+    )
+    body = (prompt or "").strip()
+    return f"{lock} {body}" if body else lock
 
 
 def _build_messages(system_prompt, user_text, image_urls, image_detail="auto"):
@@ -122,6 +167,37 @@ def _scale_frame_np(img_np, max_size):
     new_w = max(1, int(round(w * scale)))
     new_h = max(1, int(round(h * scale)))
     return cv2.resize(img_np, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+def _resolve_bernini_resolution(resolution):
+    return BERNINI_RESOLUTION_MAP.get(str(resolution or "").strip(), BERNINI_RESOLUTION_MAP[BERNINI_RESOLUTION_PRESETS[0]])
+
+
+def _clean_positive_int(value, default, minimum=1, maximum=8192):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _purge_vram_for_sampling(connector):
+    """Release llama/mmproj before CLIP, VAE and Bernini are loaded."""
+    try:
+        llama_nodes = connector._get_llama_nodes()
+        llama_nodes.LLAMA_CPP_STORAGE.clean(all=True)
+    except Exception as error:
+        mie_log(f"WenWu: llama cleanup failed: {type(error).__name__}: {error}")
+
+    gc.collect()
+    comfy.model_management.soft_empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except (RuntimeError, AttributeError):
+            pass
+    mie_log("WenWu: llama and vision projector unloaded before external CLIP encoding")
 
 
 def _image_batch_to_sampled_data_urls(image, max_frames, mode="evenly", stride=1, max_size=DEFAULT_VIDEO_MAX_SIZE, fmt=".jpg"):
@@ -302,6 +378,143 @@ class LocalLlamaCppConnector:
         return self._sanitize_response(content).strip()
 
 
+def _load_embedded_reference_images(value):
+    """Load the filenames serialized by the WenWu thumbnail grid as one IMAGE batch."""
+    try:
+        filenames = json.loads(value or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        filenames = []
+    if not isinstance(filenames, list):
+        filenames = []
+
+    images = []
+    for filename in filenames[:MAX_EMBEDDED_REFERENCE_IMAGES]:
+        if not isinstance(filename, str) or not filename.strip():
+            continue
+        path = folder_paths.get_annotated_filepath(filename)
+        if not os.path.isfile(path):
+            continue
+        with Image.open(path) as opened:
+            image = ImageOps.exif_transpose(opened).convert("RGB")
+            width, height = image.size
+            scale = min(1.0, EMBEDDED_REFERENCE_MAX_EDGE / max(width, height))
+            if scale < 1.0:
+                image = image.resize(
+                    (max(1, round(width * scale)), max(1, round(height * scale))),
+                    Image.Resampling.LANCZOS,
+                )
+            tensor = torch.from_numpy(np.asarray(image, dtype=np.float32) / 255.0).unsqueeze(0)
+            images.append(tensor)
+
+    if not images:
+        return torch.empty((0, 64, 64, 3), dtype=torch.float32)
+
+    target_h, target_w = images[0].shape[1:3]
+    normalized = []
+    for image in images:
+        if image.shape[1:3] != (target_h, target_w):
+            image = torch.nn.functional.interpolate(
+                image.movedim(-1, 1),
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+            ).movedim(1, -1)
+        normalized.append(image)
+    return torch.cat(normalized, dim=0)
+
+
+def _build_integrated_bernini_conditioning(
+    prompt,
+    clip,
+    vae,
+    width,
+    height,
+    length,
+    batch_size,
+    source_video=None,
+    reference_video=None,
+    reference_images=None,
+    negative_prompt="bad video, low quality, blurry, distorted",
+    use_default_negative=True,
+    ref_max_size=848,
+):
+    if clip is None or vae is None:
+        return None, None, None
+
+    from nodes import CLIPTextEncode, NODE_CLASS_MAPPINGS
+
+    negative_text = (negative_prompt or "").strip()
+    if not negative_text and use_default_negative:
+        negative_text = "bad video, low quality, blurry, distorted, artifacts, deformed"
+    encoder = CLIPTextEncode()
+    positive = encoder.encode(clip, prompt)[0]
+    negative = encoder.encode(clip, negative_text)[0]
+
+    conditioning_class = NODE_CLASS_MAPPINGS.get("BerniniConditioning")
+    if conditioning_class is None:
+        raise RuntimeError(
+            "BerniniConditioning is unavailable. Restart ComfyUI and verify ComfyUI-Bernini loads correctly."
+        )
+    instance = conditioning_class()
+    if hasattr(instance, "apply"):
+        kwargs = {
+            "source_video": source_video,
+            "reference_video": reference_video,
+            "ref_max_size": ref_max_size,
+        }
+        if reference_images is not None and reference_images.shape[0] > 0:
+            for index in range(min(reference_images.shape[0], MAX_EMBEDDED_REFERENCE_IMAGES)):
+                kwargs[f"reference_image_{index}"] = reference_images[index:index + 1]
+        return instance.apply(
+            positive,
+            negative,
+            vae,
+            width,
+            height,
+            length,
+            batch_size,
+            **kwargs,
+        )
+
+    if hasattr(conditioning_class, "execute"):
+        reference_map = None
+        if reference_images is not None and reference_images.shape[0] > 0:
+            reference_map = {
+                f"reference_image_{index}": reference_images[index:index + 1]
+                for index in range(min(reference_images.shape[0], MAX_EMBEDDED_REFERENCE_IMAGES))
+            }
+        result = conditioning_class.execute(
+            positive,
+            negative,
+            vae,
+            width,
+            height,
+            length,
+            batch_size,
+            source_video=source_video,
+            reference_video=reference_video,
+            reference_images=reference_map,
+            ref_max_size=ref_max_size,
+        )
+        return result.result if hasattr(result, "result") else tuple(result)
+
+    function_name = getattr(conditioning_class, "FUNCTION", None)
+    if function_name and hasattr(instance, function_name):
+        return getattr(instance, function_name)(
+            positive=positive,
+            negative=negative,
+            vae=vae,
+            width=width,
+            height=height,
+            length=length,
+            batch_size=batch_size,
+            source_video=source_video,
+            reference_video=reference_video,
+            ref_max_size=ref_max_size,
+        )
+    raise RuntimeError("Unsupported BerniniConditioning interface: no apply/execute/FUNCTION method.")
+
+
 class WenWuPromptGenerator:
     @classmethod
     def INPUT_TYPES(cls):
@@ -311,25 +524,37 @@ class WenWuPromptGenerator:
                 "task_type": (list(TASK_TYPES), {"default": "t2i - 文生图"}),
                 "user_prompt": ("STRING", {"default": "", "multiline": True}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": True}),
+                "resolution": (list(BERNINI_RESOLUTION_PRESETS), {"default": BERNINI_RESOLUTION_PRESETS[0]}),
             },
             "optional": {
                 "source": ("IMAGE",),
                 "reference_images": ("IMAGE",),
                 "reference_video": ("IMAGE",),
+                "clip": ("CLIP",),
+                "vae": ("VAE",),
                 "video_frames": ("INT", {"default": DEFAULT_VIDEO_FRAMES, "min": 1, "max": 1024}),
+                "length": ("INT", {"default": DEFAULT_BERNINI_LENGTH, "min": 1, "max": 8192, "step": 4}),
                 "reference_video_frames": ("INT", {"default": 0, "min": 0, "max": 1024}),
                 "image_detail": (["auto", "low", "high"], {"default": "auto"}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.05}),
                 "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.05}),
-                "max_tokens": ("INT", {"default": 8192, "min": 64, "max": 32768}),
+                "max_tokens": ("INT", {"default": 4096, "min": 64, "max": 32768}),
                 "timeout": ([30, 60, 120, 300], {"default": 30}),
                 "model_name": ("STRING", {"default": "ComfyUI-llama-cpp"}),
                 "clear_context": ("BOOLEAN", {"default": True}),
+                "purge_vram": ("BOOLEAN", {"default": True}),
+                "uploaded_images_json": ("STRING", {"default": "[]"}),
+                "custom_width": ("INT", {"default": 832, "min": 16, "max": 8192, "step": 16, "label": "宽度 width"}),
+                "custom_height": ("INT", {"default": 480, "min": 16, "max": 8192, "step": 16, "label": "高度 height"}),
+                "negative_prompt": ("STRING", {"default": "bad video, low quality, blurry, distorted", "multiline": True}),
+                "use_default_negative": ("BOOLEAN", {"default": True}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 64}),
+                "ref_max_size": ("INT", {"default": 848, "min": 16, "max": 8192, "step": 16}),
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("wenwu_prompt", "wenwu_prompt_ref")
+    RETURN_TYPES = ("STRING", "STRING", "INT", "INT", "INT", "IMAGE", "CONDITIONING", "CONDITIONING", "LATENT")
+    RETURN_NAMES = ("wenwu_prompt", "wenwu_prompt_ref", "width", "height", "length", "reference_images", "positive", "negative", "latent")
     FUNCTION = "generate"
     CATEGORY = MY_CATEGORY
 
@@ -386,28 +611,91 @@ class WenWuPromptGenerator:
         task_type,
         user_prompt,
         seed,
+        resolution,
         source=None,
         reference_images=None,
         reference_video=None,
+        clip=None,
+        vae=None,
+        uploaded_images_json="[]",
         video_frames=DEFAULT_VIDEO_FRAMES,
+        length=DEFAULT_BERNINI_LENGTH,
         reference_video_frames=0,
         image_detail="auto",
         temperature=0.7,
         top_p=0.9,
-        max_tokens=8192,
+        max_tokens=4096,
         timeout=30,
         model_name="ComfyUI-llama-cpp",
         clear_context=True,
+        purge_vram=True,
+        custom_width=832,
+        custom_height=480,
+        negative_prompt="bad video, low quality, blurry, distorted",
+        use_default_negative=True,
+        batch_size=1,
+        ref_max_size=848,
     ):
         connector = LocalLlamaCppConnector(llama_model, model_name=model_name, clear_context=clear_context, timeout=timeout)
         code = parse_task_code(task_type)
+        width, height = _resolve_bernini_resolution(resolution)
+        width = _clean_positive_int(custom_width, width, minimum=16, maximum=8192)
+        height = _clean_positive_int(custom_height, height, minimum=16, maximum=8192)
+        length = _clean_positive_int(length, DEFAULT_BERNINI_LENGTH, minimum=1, maximum=8192)
+
+        embedded_reference_images = _load_embedded_reference_images(uploaded_images_json)
+        effective_reference_images = (
+            embedded_reference_images
+            if embedded_reference_images.shape[0] > 0
+            else reference_images
+        )
+
+        def finalize(prompt):
+            prompt = prompt or user_prompt
+            prompt_ref = self._bilingual_ref(connector, user_prompt, prompt)
+            if purge_vram:
+                _purge_vram_for_sampling(connector)
+            output_images = effective_reference_images
+            if output_images is None:
+                output_images = torch.empty((0, 64, 64, 3), dtype=torch.float32)
+            positive, negative, latent = _build_integrated_bernini_conditioning(
+                prompt,
+                clip,
+                vae,
+                width,
+                height,
+                length,
+                batch_size,
+                source_video=source,
+                reference_video=reference_video,
+                reference_images=output_images,
+                negative_prompt=negative_prompt,
+                use_default_negative=use_default_negative,
+                ref_max_size=ref_max_size,
+            )
+            result = (
+                prompt,
+                prompt_ref,
+                width,
+                height,
+                length,
+                output_images,
+                positive,
+                negative,
+                latent,
+            )
+            return {
+                "ui": {"wenwu_prompt": [prompt]},
+                "result": result,
+            }
+
         source_urls = _image_batch_to_sampled_data_urls(
             source,
             video_frames,
             max_size=DEFAULT_VIDEO_MAX_SIZE,
         )
         ref_img_urls = _image_batch_to_sampled_data_urls(
-            reference_images,
+            effective_reference_images,
             16,
             mode="evenly",
             max_size=DEFAULT_VIDEO_MAX_SIZE,
@@ -417,45 +705,43 @@ class WenWuPromptGenerator:
             reference_video_frames or (DEFAULT_REFERENCE_VIDEO_FRAMES if code == "ads2v" else DEFAULT_VIDEO_FRAMES),
             max_size=DEFAULT_VIDEO_MAX_SIZE,
         )
+        if code == "i2v" and not source_urls and len(ref_img_urls) > 1:
+            # The built-in gallery contains references, not first/middle/last frames.
+            # Multiple gallery images therefore mean reference composition (r2v).
+            code = "r2v"
         base_sys = SYSTEM_PROMPTS.get(code, SYSTEM_PROMPTS["default"])
         json_mode = code in JSON_MODE_TASKS
 
         if code == "t2v":
             out = self._chat(connector, T2V_A14B_EN_SYS_PROMPT, user_prompt, [], json_mode=False, image_detail=image_detail, temperature=temperature, top_p=top_p, max_tokens=max_tokens)
-            out = out or user_prompt
-            return (out, self._bilingual_ref(connector, user_prompt, out))
+            return finalize(out)
         if code == "t2i":
             out = self._chat(connector, T2I_A14B_EN_SYS_PROMPT, user_prompt, [], json_mode=False, image_detail=image_detail, temperature=temperature, top_p=top_p, max_tokens=max_tokens)
-            out = out or user_prompt
-            return (out, self._bilingual_ref(connector, user_prompt, out))
+            return finalize(out)
         if code == "r2v":
             text = R2V_TEMPLATE.format(image_num=max(len(ref_img_urls), 1), original_text=user_prompt)
             out = self._chat(connector, base_sys, text, ref_img_urls, json_mode=True, image_detail=image_detail, temperature=temperature, top_p=top_p, max_tokens=max_tokens)
-            out = out or user_prompt
-            return (out, self._bilingual_ref(connector, user_prompt, out))
+            return finalize(_apply_reference_identity_lock(out, len(ref_img_urls)))
         if code == "r2i":
             text = R2I_TEMPLATE.format(image_num=max(len(ref_img_urls), 1), original_text=user_prompt)
             out = self._chat(connector, base_sys, text, ref_img_urls, json_mode=True, image_detail=image_detail, temperature=temperature, top_p=top_p, max_tokens=max_tokens)
-            out = out or user_prompt
-            return (out, self._bilingual_ref(connector, user_prompt, out))
+            return finalize(_apply_reference_identity_lock(out, len(ref_img_urls)))
         if code == "i2i":
             if not source_urls:
-                return (user_prompt, self._bilingual_ref(connector, user_prompt, user_prompt))
+                return finalize(user_prompt)
             text = I2I_TEMPLATE.format(user_prompt=user_prompt)
             out = self._chat(connector, base_sys, text, source_urls[:1] + ref_img_urls, json_mode=False, image_detail=image_detail, temperature=temperature, top_p=top_p, max_tokens=max_tokens)
-            out = out or user_prompt
-            return (out, self._bilingual_ref(connector, user_prompt, out))
+            return finalize(out)
         if code == "i2v":
             if source_urls:
                 imgs = source_urls[:1] + ref_img_urls
             elif ref_img_urls:
                 imgs = ref_img_urls[:1]
             else:
-                return (user_prompt, self._bilingual_ref(connector, user_prompt, user_prompt))
+                return finalize(user_prompt)
             text = I2V_TEMPLATE.format(user_prompt=user_prompt, image_num=len(imgs))
             out = self._chat(connector, base_sys, text, imgs, json_mode=False, image_detail=image_detail, temperature=temperature, top_p=top_p, max_tokens=max_tokens)
-            out = out or user_prompt
-            return (out, self._bilingual_ref(connector, user_prompt, out))
+            return finalize(out)
         if code == "ri2i":
             if source_urls:
                 imgs = source_urls + ref_img_urls
@@ -464,34 +750,29 @@ class WenWuPromptGenerator:
                 imgs = ref_img_urls
                 ref_num = max(len(ref_img_urls) - 1, 0)
             else:
-                return (user_prompt, self._bilingual_ref(connector, user_prompt, user_prompt))
+                return finalize(user_prompt)
             text = RI2I_TEMPLATE.format(ref_num=ref_num, original_text=user_prompt)
             out = self._chat(connector, base_sys, text, imgs, json_mode=True, image_detail=image_detail, temperature=temperature, top_p=top_p, max_tokens=max_tokens)
-            out = out or user_prompt
-            return (out, self._bilingual_ref(connector, user_prompt, out))
+            return finalize(out)
         if code in ("v2v", "mv2v"):
             text = V2V_TEMPLATE.format(user_prompt=user_prompt)
             out = self._chat(connector, base_sys, text, source_urls, json_mode=False, image_detail=image_detail, temperature=temperature, top_p=top_p, max_tokens=max_tokens)
-            out = out or user_prompt
-            return (out, self._bilingual_ref(connector, user_prompt, out))
+            return finalize(out)
         if code == "ads2v":
             text = ADS2V_TEMPLATE.format(user_prompt=user_prompt)
             out = self._chat(connector, base_sys, text, source_urls + ref_vid_urls, json_mode=False, image_detail=image_detail, temperature=temperature, top_p=top_p, max_tokens=max_tokens)
-            out = out or user_prompt
-            return (out, self._bilingual_ref(connector, user_prompt, out))
+            return finalize(out)
         if code == "vi2v":
             text = VI2V_TEMPLATE.format(user_prompt=user_prompt, image_num=len(ref_img_urls))
             out = self._chat(connector, base_sys, text, source_urls + ref_img_urls, json_mode=False, image_detail=image_detail, temperature=temperature, top_p=top_p, max_tokens=max_tokens)
-            out = out or user_prompt
-            return (out, self._bilingual_ref(connector, user_prompt, out))
+            return finalize(out)
         if code in ("rv2v", "vrc2v"):
             ref_total = ref_img_urls + ref_vid_urls
             text = VR2V_TEMPLATE.format(image_num=max(len(ref_total), 1), original_text=user_prompt)
             out = self._chat(connector, base_sys, text, source_urls + ref_total, json_mode=True, image_detail=image_detail, temperature=temperature, top_p=top_p, max_tokens=max_tokens)
-            out = out or user_prompt
-            return (out, self._bilingual_ref(connector, user_prompt, out))
+            return finalize(out)
 
-        return (user_prompt, self._bilingual_ref(connector, user_prompt, user_prompt))
+        return finalize(user_prompt)
 
     def is_changed(
         self,
@@ -499,21 +780,56 @@ class WenWuPromptGenerator:
         task_type,
         user_prompt,
         seed,
+        resolution,
         source=None,
         reference_images=None,
         reference_video=None,
+        clip=None,
+        vae=None,
+        uploaded_images_json="[]",
         video_frames=DEFAULT_VIDEO_FRAMES,
+        length=DEFAULT_BERNINI_LENGTH,
         reference_video_frames=0,
         image_detail="auto",
         temperature=0.7,
         top_p=0.9,
-        max_tokens=8192,
+        max_tokens=4096,
         timeout=30,
         model_name="ComfyUI-llama-cpp",
         clear_context=True,
+        purge_vram=True,
+        custom_width=832,
+        custom_height=480,
+        negative_prompt="bad video, low quality, blurry, distorted",
+        use_default_negative=True,
+        batch_size=1,
+        ref_max_size=848,
     ):
         h = hashlib.md5()
-        for value in (task_type, user_prompt, seed, video_frames, reference_video_frames, image_detail, temperature, top_p, max_tokens, timeout, model_name, clear_context):
+        for value in (
+            task_type,
+            resolution,
+            user_prompt,
+            seed,
+            video_frames,
+            length,
+            reference_video_frames,
+            image_detail,
+            temperature,
+            top_p,
+            max_tokens,
+            timeout,
+            model_name,
+            clear_context,
+            purge_vram,
+            uploaded_images_json,
+            custom_width,
+            custom_height,
+            negative_prompt,
+            use_default_negative,
+            batch_size,
+            ref_max_size,
+        ):
             h.update(str(value).encode("utf-8"))
         try:
             h.update(llama_model.get_state().encode("utf-8"))
